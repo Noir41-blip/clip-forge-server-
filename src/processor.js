@@ -58,4 +58,120 @@ function pickNonOverlapping(sortedWindows, count, minGapSeconds) {
     if (!overlaps) picked.push(w);
   }
   return picked;
+}async function scoreWindows(filePath, totalDuration, windowSeconds = 45) {
+  const windows = [];
+  for (let start = 0; start + windowSeconds <= totalDuration; start += windowSeconds) {
+    windows.push({ start, end: start + windowSeconds });
+  }
+  if (windows.length === 0) {
+    windows.push({ start: 0, end: totalDuration });
+  }
+
+  const scored = [];
+  for (const w of windows) {
+    try {
+      const { stderr } = await execFileAsync("ffmpeg", [
+        "-i", filePath,
+        "-ss", String(w.start),
+        "-t", String(w.end - w.start),
+        "-af", "volumedetect",
+        "-vn",
+        "-f", "null",
+        "-",
+      ]);
+      const match = stderr.match(/mean_volume:\s*(-?\d+(\.\d+)?)\s*dB/);
+      const meanVolume = match ? parseFloat(match[1]) : -100;
+      scored.push({ ...w, score: meanVolume });
+    } catch (e) {
+      scored.push({ ...w, score: -100 });
+    }
+  }
+  return scored.sort((a, b) => b.score - a.score);
 }
+
+function pickNonOverlapping(sortedWindows, count, minGapSeconds) {
+  const picked = [];
+  for (const w of sortedWindows) {
+    if (picked.length >= count) break;
+    const overlaps = picked.some((p) => Math.abs(p.start - w.start) < minGapSeconds);
+    if (!overlaps) picked.push(w);
+  }
+  return picked;
+}const HOOK_TITLES = [
+  "You won't believe what happens next",
+  "This moment went viral instantly",
+  "The reaction says it all",
+  "Chat could not handle this",
+  "Absolute chaos in 45 seconds",
+  "The clip everyone's talking about",
+  "This is why we stream",
+  "Nobody expected this twist",
+];
+
+async function processVideo({ jobId, url, clipCount, clipsDir, jobs }) {
+  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "clipforge-"));
+  const sourcePath = path.join(workDir, "source.mp4");
+
+  try {
+    updateJob(jobs, jobId, { status: "processing", step: "Fetching video", progress: 5 });
+
+    await execFileAsync("yt-dlp", [
+      "-f", "mp4[height<=720]/best[height<=720]/best",
+      "-o", sourcePath,
+      url,
+    ]);
+
+    updateJob(jobs, jobId, { step: "Analyzing highlights", progress: 30 });
+
+    const duration = await getDuration(sourcePath);
+    const scoredWindows = await scoreWindows(sourcePath, duration);
+    const chosen = pickNonOverlapping(scoredWindows, clipCount, 60);
+
+    updateJob(jobs, jobId, { step: "Generating clips", progress: 60 });
+
+    const jobClipsDir = path.join(clipsDir, jobId);
+    fs.mkdirSync(jobClipsDir, { recursive: true });
+
+    const clips = [];
+    for (let i = 0; i < chosen.length; i++) {
+      const w = chosen[i];
+      const clipFileName = `clip-${i + 1}.mp4`;
+      const clipPath = path.join(jobClipsDir, clipFileName);
+
+      await execFileAsync("ffmpeg", [
+        "-y",
+        "-i", sourcePath,
+        "-ss", String(w.start),
+        "-t", String(w.end - w.start),
+        "-af", "loudnorm",
+        "-c:v", "libx264",
+        "-c:a", "aac",
+        clipPath,
+      ]);
+
+      clips.push({
+        id: `${jobId}-${i + 1}`,
+        title: HOOK_TITLES[i % HOOK_TITLES.length],
+        durationSeconds: Math.round(w.end - w.start),
+        startSeconds: Math.round(w.start),
+        endSeconds: Math.round(w.end),
+        viralityScore: Math.max(40, Math.min(99, Math.round(60 + (w.score + 30)))),
+        audioEnhanced: true,
+        downloadUrl: `/clips/${jobId}/${clipFileName}`,
+      });
+    }
+
+    updateJob(jobs, jobId, { step: "Enhancing audio", progress: 90 });
+
+    updateJob(jobs, jobId, {
+      status: "completed",
+      step: "Done",
+      progress: 100,
+      clips,
+    });
+  } finally {
+    fs.rm(workDir, { recursive: true, force: true }, () => {});
+  }
+}
+
+module.exports = { processVideo };

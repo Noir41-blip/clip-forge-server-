@@ -1,9 +1,8 @@
-FROM node:20-bullseye
+FROM node:20-bookworm-slim
 
-# Install ffmpeg and python3/pip (needed for yt-dlp), then install yt-dlp itself
 RUN apt-get update && \
-    apt-get install -y ffmpeg python3 python3-pip && \
-    pip3 install --no-cache-dir -U yt-dlp && \
+    apt-get install -y --no-install-recommends ffmpeg python3 python3-pip curl ca-certificates && \
+    pip3 install --no-cache-dir -U yt-dlp --break-system-packages && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
